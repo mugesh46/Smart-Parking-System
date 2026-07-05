@@ -14,7 +14,7 @@ opencv-python==4.10.0.84
 ultralytics==8.3.58
 scikit-learn==1.6.0
 pandas==2.2.3
-numpy==2.2.1
+numpy==1.26.4
 qrcode[pil]==8.0
 reportlab==4.2.5
 openpyxl==3.1.5
