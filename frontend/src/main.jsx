@@ -18,7 +18,7 @@ import {
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-const HOURLY_RATE = 120;
+const HOURLY_RATE = 80;
 
 const navItems = [
   { id: "parking", label: "Live Parking", icon: MapPinned },
@@ -30,12 +30,16 @@ const navItems = [
 ];
 
 function createDemoSlots() {
-  return Array.from({ length: 48 }, (_, index) => ({
-    id: index + 1,
-    code: `A-${String(index + 1).padStart(3, "0")}`,
-    status: index % 7 === 0 ? "reserved" : index % 3 === 0 ? "occupied" : "available",
-    slot_type: index % 11 === 0 ? "ev" : index % 13 === 0 ? "disabled" : "standard"
-  }));
+  const sections = ["A", "B", "C"];
+  return Array.from({ length: 48 }, (_, index) => {
+    const section = sections[index % sections.length];
+    return {
+      id: index + 1,
+      code: `${section}-${String(index + 1).padStart(3, "0")}`,
+      status: index % 7 === 0 ? "reserved" : index % 3 === 0 ? "occupied" : "available",
+      slot_type: index % 11 === 0 ? "ev" : index % 13 === 0 ? "disabled" : "standard"
+    };
+  });
 }
 
 function makeReceipt(slot, amount, method) {
@@ -43,6 +47,10 @@ function makeReceipt(slot, amount, method) {
     slotCode: slot.code,
     amount,
     method,
+    // customer details may be attached to the slot
+    customerName: slot.customerName,
+    customerPhone: slot.customerPhone,
+    customerEmail: slot.customerEmail,
     invoice: `INV-${Date.now().toString().slice(-8)}`,
     paidAt: new Date().toLocaleString("en-IN", {
       dateStyle: "medium",
@@ -62,6 +70,11 @@ function App() {
   const [vehicleNumber, setVehicleNumber] = useState("TN-01-AB-1234");
   const [durationHours, setDurationHours] = useState(2);
   const [paymentMethod, setPaymentMethod] = useState("UPI");
+  const [userName, setUserName] = useState("");
+  const [userPhone, setUserPhone] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [overstayAlert, setOverstayAlert] = useState("");
   const [receipt, setReceipt] = useState(null);
   const [showPaymentComplete, setShowPaymentComplete] = useState(false);
 
@@ -75,6 +88,37 @@ function App() {
         }
       })
       .catch(() => setToast("Using demo slots while API data is unavailable."));
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSlots((current) => {
+        let updated = false;
+        const next = current.map((slot) => {
+          if (slot.status === "mine" && slot.expiresAt && Date.now() > slot.expiresAt && !slot.alertSent) {
+            updated = true;
+            const extraHours = Math.ceil((Date.now() - slot.expiresAt) / (1000 * 60 * 60));
+            setToast(`Overstay alert for ${slot.code}: extra ${extraHours} hour(s), fine Rs. ${extraHours * 50}`);
+            setOverstayAlert(`Parking time expired for ${slot.code}. Fine Rs. ${extraHours * 50}. Please send message to the user.`);
+            return {
+              ...slot,
+              alertSent: true,
+              fine: extraHours * 50
+            };
+          }
+          return slot;
+        });
+        return updated ? next : current;
+      });
+    }, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const seen = localStorage.getItem("welcomeSeen");
+      if (seen) setShowWelcome(false);
+    } catch (e) {}
   }, []);
 
   const selected = slots.find((slot) => slot.code === selectedSlot);
@@ -107,25 +151,52 @@ function App() {
       setToast("Select an available slot first.");
       return;
     }
+    if (!userName || !userPhone || !userEmail) {
+      setToast("Please enter name, phone and email before reserving.");
+      return;
+    }
     updateSlot(slot.code, {
       status: "reserved",
       vehicleNumber,
-      reservedAt: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+      reservedAt: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+      customerName: userName,
+      customerPhone: userPhone,
+      customerEmail: userEmail
     });
     setSelectedSlot(slot.code);
-    setActiveView("payments");
+    setActiveView("reservations");
     setReceipt(null);
     setPaymentStatus(`Payment pending for ${slot.code}.`);
     setToast(`${slot.code} reserved. Complete payment to make this slot yours.`);
   }
 
   function reserveNearestSlot() {
-    const nearest = slots.find((slot) => slot.status === "available");
+    // Allocate in alphabetical section order: A -> B -> C
+    const sections = ["A", "B", "C"];
+    let nearest = null;
+    for (const sec of sections) {
+      nearest = slots.find((slot) => slot.status === "available" && slot.code.startsWith(`${sec}-`));
+      if (nearest) break;
+    }
     if (!nearest) {
       setToast("No available slots right now.");
       return;
     }
     reserveSlot(nearest);
+  }
+
+  function handleWelcomeNext() {
+    if (!userName || !userPhone || !userEmail) {
+      setToast("Please enter name, phone and email to continue.");
+      return;
+    }
+    // close welcome and run reservation flow
+    try {
+      localStorage.setItem("welcomeSeen", "1");
+    } catch (e) {}
+    setShowWelcome(false);
+    // ensure view shows reservations
+    setActiveView("reservations");
   }
 
   function cancelReservation(slot = selected) {
@@ -174,12 +245,16 @@ function App() {
     }
 
     const paidReceipt = makeReceipt(payableSlot, paymentAmount, paymentMethod);
+    const expiryTimestamp = Date.now() + durationHours * 60 * 60 * 1000;
     updateSlot(payableSlot.code, {
       status: "mine",
       vehicleNumber,
       durationHours,
       paidAt: paidReceipt.paidAt,
-      invoice: paidReceipt.invoice
+      invoice: paidReceipt.invoice,
+      expiresAt: expiryTimestamp,
+      fine: 0,
+      alertSent: false
     });
     setSelectedSlot(payableSlot.code);
     setReceipt(paidReceipt);
@@ -190,8 +265,16 @@ function App() {
 
   function exportReport() {
     const rows = [
-      ["code", "status", "slot_type", "vehicle_number", "invoice"],
-      ...slots.map((slot) => [slot.code, slot.status, slot.slot_type, slot.vehicleNumber ?? "", slot.invoice ?? ""])
+      ["code", "status", "slot_type", "vehicle_number", "invoice", "expires_at", "fine"],
+      ...slots.map((slot) => [
+        slot.code,
+        slot.status,
+        slot.slot_type,
+        slot.vehicleNumber ?? "",
+        slot.invoice ?? "",
+        slot.expiresAt ? new Date(slot.expiresAt).toLocaleString("en-IN") : "",
+        slot.fine ?? 0
+      ])
     ];
     const csv = rows.map((row) => row.join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -208,6 +291,49 @@ function App() {
     setToast(`${navItems.find((item) => item.id === id)?.label} opened.`);
   }
 
+  if (showWelcome) {
+    return (
+      <main className={dark ? "app dark" : "app"}>
+        <section className="welcome-overlay" role="dialog" aria-modal="true" aria-label="Welcome">
+          <div className="welcome-core">
+            <h2>WELCOME TO SMART BOOKING PLATFORM</h2>
+            <p>Please enter your details to begin booking.</p>
+            <label className="field">
+              Full name
+              <input placeholder="Full name" value={userName} onChange={(e) => setUserName(e.target.value)} />
+            </label>
+            <label className="field">
+              Phone
+              <input placeholder="Phone number" value={userPhone} onChange={(e) => setUserPhone(e.target.value)} />
+            </label>
+            <label className="field">
+              Email
+              <input placeholder="Email address" value={userEmail} onChange={(e) => setUserEmail(e.target.value)} />
+            </label>
+            <label className="field">
+              Vehicle Number
+              <input placeholder="Vehicle number" value={vehicleNumber} onChange={(e) => setVehicleNumber(e.target.value.toUpperCase())} />
+            </label>
+            <div className="welcome-actions">
+              <button type="button" className="primary" onClick={handleWelcomeNext}>Next</button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  try {
+                    localStorage.setItem("welcomeSeen", "1");
+                  } catch (e) {}
+                  setShowWelcome(false);
+                }}
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
   return (
     <main className={dark ? "app dark" : "app"}>
       {showPaymentComplete && receipt && (
@@ -231,6 +357,18 @@ function App() {
           </div>
 
           <div className="payment-details">
+            {receipt.customerName && (
+              <div>
+                <span>Name</span>
+                <strong>{receipt.customerName}</strong>
+              </div>
+            )}
+            {receipt.customerPhone && (
+              <div>
+                <span>Phone</span>
+                <strong>{receipt.customerPhone}</strong>
+              </div>
+            )}
             <div>
               <span>Vehicle</span>
               <strong>{vehicleNumber}</strong>
@@ -247,6 +385,17 @@ function App() {
               <span>Time</span>
               <strong>{receipt.paidAt}</strong>
             </div>
+          </div>
+
+          <div className="payment-qr">
+            <span>Reservation QR</span>
+            <img
+              alt={`QR for ${receipt.slotCode}`}
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
+                receipt.invoice + "|" + receipt.slotCode + "|" + (receipt.customerName ?? "") + "|" + (receipt.customerPhone ?? "")
+              )}`}
+            />
+            <div className="thank-you">THANK YOU</div>
           </div>
 
           <button type="button" className="done-button" onClick={() => setShowPaymentComplete(false)}>
@@ -293,6 +442,16 @@ function App() {
             <div>
               <strong>Payment successful. Slot {receipt.slotCode} is yours.</strong>
               <span>{receipt.invoice} - {receipt.method} - Rs. {receipt.amount.toLocaleString("en-IN")}</span>
+            </div>
+          </section>
+        )}
+
+        {overstayAlert && (
+          <section className="warning-banner">
+            <Bell size={22} />
+            <div>
+              <strong>Overstay Alert</strong>
+              <span>{overstayAlert}</span>
             </div>
           </section>
         )}
@@ -370,6 +529,18 @@ function App() {
                 <p className="forecast">
                   {selected ? `${selected.code} is ${selected.status}. Type: ${selected.slot_type}.` : "Select a slot on the map."}
                 </p>
+                <label className="field">
+                  Name
+                  <input value={userName} onChange={(e) => setUserName(e.target.value)} placeholder="Full name" />
+                </label>
+                <label className="field">
+                  Phone
+                  <input value={userPhone} onChange={(e) => setUserPhone(e.target.value)} placeholder="Phone number" />
+                </label>
+                <label className="field">
+                  Email
+                  <input value={userEmail} onChange={(e) => setUserEmail(e.target.value)} placeholder="Email address" />
+                </label>
                 <button type="button" className="secondary" onClick={() => reserveSlot()}>Reserve Selected</button>
                 <button type="button" className="ghost" onClick={() => cancelReservation()}>Cancel Unpaid Reservation</button>
                 <button type="button" className="ghost" onClick={() => releaseOwnedSlot()}>Release My Slot</button>
@@ -392,6 +563,8 @@ function App() {
                   <div className="receipt">
                     <ShieldCheck size={22} />
                     <strong>Slot {receipt.slotCode} is yours</strong>
+                    {receipt.customerName && <span>{receipt.customerName}</span>}
+                    {receipt.customerPhone && <span>{receipt.customerPhone}</span>}
                     <span>Invoice: {receipt.invoice}</span>
                     <span>Paid: Rs. {receipt.amount.toLocaleString("en-IN")}</span>
                     <span>Time: {receipt.paidAt}</span>
@@ -438,6 +611,8 @@ function App() {
                   <div className="receipt">
                     <ShieldCheck size={22} />
                     <strong>Slot {receipt.slotCode} is yours</strong>
+                    {receipt.customerName && <span>{receipt.customerName}</span>}
+                    {receipt.customerPhone && <span>{receipt.customerPhone}</span>}
                     <span>Invoice: {receipt.invoice}</span>
                     <span>Paid: Rs. {receipt.amount.toLocaleString("en-IN")}</span>
                     <span>Time: {receipt.paidAt}</span>
